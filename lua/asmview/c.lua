@@ -170,10 +170,14 @@ function M.command(file, config, filetype)
     end
     local obj = entry and object_path(entry)
     if config.object then
-        obj = config.object(obj, file, entry)
+        local ok, mapped = pcall(config.object, obj, file, entry)
+        if not ok then
+            return nil, "object option failed: " .. tostring(mapped)
+        end
+        obj = mapped
     end
     if not obj then
-        return nil, "no compile_commands.json entry for " .. vim.fs.basename(file) .. " (set build = true to compile it here)"
+        return build_command(file, config, filetype, entry)
     end
     if not vim.uv.fs_stat(obj) then
         return nil, "no object file at " .. obj .. " (build the project, or set build = true)", obj

@@ -7,7 +7,7 @@ Side-by-side assembly view for C, C++ and Go. Compiles locally and highlights th
 ```lua
 {
     "emkai/asmview.nvim",
-    cmd = "AsmView",
+    cmd = { "AsmView", "AsmCompare" },
     keys = {
         { "<leader>aa", function() require("asmview").toggle() end, desc = "toggle assembly view" },
         { "<leader>ac", function() require("asmview").compare() end, desc = "toggle assembly compare pane" },

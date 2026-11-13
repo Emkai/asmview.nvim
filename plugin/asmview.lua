@@ -1,9 +1,5 @@
-local flags = { "-O0", "-O1", "-O2", "-O3", "-Os", "-Oz", "-Og", "-march=native", "-fno-inline", "-funroll-loops", "-ffast-math" }
-
 local function complete(lead)
-    return vim.tbl_filter(function(f)
-        return f:sub(1, #lead) == lead
-    end, flags)
+    return require("asmview").complete(lead)
 end
 
 vim.api.nvim_create_user_command("AsmView", function(opts)
@@ -12,8 +8,12 @@ vim.api.nvim_create_user_command("AsmView", function(opts)
     else
         require("asmview").toggle()
     end
-end, { nargs = "*", complete = complete, desc = "Toggle assembly view, or rebuild it with extra compiler flags" })
+end, { nargs = "*", complete = complete, desc = "Toggle assembly view, or set its source and extra flags" })
 
 vim.api.nvim_create_user_command("AsmCompare", function(opts)
     require("asmview").compare(opts.fargs)
-end, { nargs = "*", complete = complete, desc = "Toggle compare pane, or rebuild it with extra compiler flags" })
+end, { nargs = "*", complete = complete, desc = "Toggle compare pane, or set its source and extra flags" })
+
+vim.api.nvim_create_user_command("AsmSource", function(opts)
+    require("asmview").source(opts.fargs)
+end, { nargs = "*", complete = complete, desc = "Pick the source for the assembly pane under the cursor" })

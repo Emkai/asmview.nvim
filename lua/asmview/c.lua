@@ -74,8 +74,17 @@ local function find_db(file)
     end
 end
 
-local function find_entry(file)
+local function find_entry(file, override)
     local db = find_db(file)
+    if override then
+        db = vim.fn.expand(override)
+        if vim.fn.isdirectory(db) == 1 then
+            db = db .. "/compile_commands.json"
+        end
+        if not vim.uv.fs_stat(db) then
+            return nil
+        end
+    end
     if not db then
         return
     end
@@ -98,7 +107,7 @@ local drop_with_value = { ["-o"] = true, ["-MF"] = true, ["-MT"] = true, ["-MQ"]
 local drop = { ["-c"] = true, ["-MD"] = true, ["-MMD"] = true, ["-M"] = true, ["-MM"] = true }
 local launchers = { ccache = true, sccache = true }
 
-local function rewrite(args, extra)
+local function rewrite(args)
     local out, skip = {}, false
     for i, arg in ipairs(args) do
         if skip then
@@ -110,8 +119,6 @@ local function rewrite(args, extra)
             table.insert(out, arg)
         end
     end
-    vim.list_extend(out, extra or {})
-    vim.list_extend(out, asm_flags)
     return out
 end
 
@@ -152,21 +159,24 @@ local function objdump_for(obj, config)
 end
 
 local function build_command(file, config, filetype, entry)
+    local cmd, cwd
     if entry then
-        local args = entry.arguments or shell_split(entry.command)
-        return { cmd = rewrite(args, config.extra_flags), cwd = entry.directory, stream = "stdout" }
+        cmd, cwd = rewrite(entry.arguments or shell_split(entry.command)), entry.directory
+    else
+        cmd, cwd = { filetype == "cpp" and "c++" or "cc" }, vim.fs.dirname(file)
+        vim.list_extend(cmd, config.c_fallback_flags)
+        table.insert(cmd, file)
     end
-    local compiler = filetype == "cpp" and "c++" or "cc"
-    local cmd = { compiler }
-    vim.list_extend(cmd, config.c_fallback_flags)
     vim.list_extend(cmd, config.extra_flags or {})
+    if config.args then
+        cmd = config.args(cmd, file, entry) or cmd
+    end
     vim.list_extend(cmd, asm_flags)
-    table.insert(cmd, file)
-    return { cmd = cmd, cwd = vim.fs.dirname(file), stream = "stdout" }
+    return { cmd = cmd, cwd = cwd, stream = "stdout" }
 end
 
 function M.command(file, config, filetype)
-    local entry = find_entry(file)
+    local entry = find_entry(file, config.compile_commands)
     if config.build then
         return build_command(file, config, filetype, entry)
     end

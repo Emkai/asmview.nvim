@@ -11,7 +11,11 @@ local config = {
     extra_flags = {},
     objdump = nil,
     object = nil,
-    compare = { build = true },
+    sources = {
+        output = {},
+        compile = { build = true },
+    },
+    panes = { "output", "compile" },
     compare_split = "below",
     c_fallback_flags = { "-O2" },
 }
@@ -27,7 +31,47 @@ local group_name = "asmview"
 local state
 
 function M.setup(opts)
-    config = vim.tbl_deep_extend("force", config, opts or {})
+    opts = opts or {}
+    local sources = opts.sources
+    opts.sources = nil
+    config = vim.tbl_deep_extend("force", config, opts)
+    if sources then
+        config.sources = sources
+    end
+    if opts.panes then
+        config.panes = opts.panes
+    end
+end
+
+local function source_names()
+    local names = vim.tbl_keys(config.sources)
+    table.sort(names)
+    return names
+end
+
+local function parse_args(args)
+    local name, flags = nil, {}
+    for _, a in ipairs(args or {}) do
+        if config.sources[a] then
+            name = a
+        elseif a:sub(1, 1) == "-" then
+            table.insert(flags, a)
+        else
+            vim.notify("asmview: unknown source " .. a .. " (have: " .. table.concat(source_names(), ", ") .. ")", vim.log.levels.WARN)
+        end
+    end
+    return name, flags
+end
+
+local function resolve(name, flags)
+    local base = vim.tbl_extend("force", {}, config)
+    base.sources, base.panes = nil, nil
+    local cfg = vim.tbl_deep_extend("force", base, config.sources[name] or {})
+    if flags and #flags > 0 then
+        cfg.build = true
+        cfg.extra_flags = vim.list_extend(vim.deepcopy(cfg.extra_flags or {}), flags)
+    end
+    return cfg
 end
 
 local function view_of(buf)
@@ -193,13 +237,13 @@ build = function(v)
         local result = (job.parse or backend.parse)(out, file, job.cwd)
         local winbar
         if job.object then
-            v.label = vim.fn.fnamemodify(job.object, ":~:.")
+            v.label = v.source .. ": " .. vim.fn.fnamemodify(job.object, ":~:.")
             winbar = " " .. v.label
             if stale(job.object, file) then
                 winbar = winbar .. "  %#WarningMsg#(older than source)"
             end
         else
-            v.label = "built by asmview" .. (#(v.cfg.extra_flags or {}) > 0 and " " .. table.concat(v.cfg.extra_flags, " ") or "")
+            v.label = v.source .. ": built by asmview" .. (#(v.cfg.extra_flags or {}) > 0 and " " .. table.concat(v.cfg.extra_flags, " ") or "")
             winbar = " " .. v.label
         end
         set_view(v, result.lines, winbar)
@@ -276,14 +320,14 @@ local function attach(buf, file)
     build_all()
 end
 
-local function new_view(cfg, scheme, win, split)
+local function new_view(name, flags, scheme, win, split)
     local buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].filetype = "asm"
     vim.bo[buf].bufhidden = "wipe"
     vim.bo[buf].modifiable = false
     local asm_win = vim.api.nvim_open_win(buf, false, { split = split or "right", win = win })
     vim.wo[asm_win].wrap = false
-    local v = { buf = buf, cfg = cfg, scheme = scheme, src_to_asm = {}, asm_to_src = {}, notes = {}, note_col = 0 }
+    local v = { buf = buf, source = name, cfg = resolve(name, flags), scheme = scheme, src_to_asm = {}, asm_to_src = {}, notes = {}, note_col = 0 }
     table.insert(state.views, v)
     vim.api.nvim_create_autocmd("BufWipeout", {
         group = group_name,
@@ -305,18 +349,18 @@ local function new_view(cfg, scheme, win, split)
     return v
 end
 
-local function with_flags(cfg, flags)
-    if not flags or #flags == 0 then
-        return cfg
-    end
-    return vim.tbl_extend("force", cfg, { build = true, extra_flags = flags })
+local function set_source(v, name, flags)
+    v.source = name
+    v.cfg = resolve(name, flags)
+    set_view(v, { "loading " .. vim.fs.basename(state.file) .. " (" .. name .. ")..." })
+    build(v)
 end
 
-function M.open(flags)
+function M.open(args)
+    local name, flags = parse_args(args)
     if state then
-        if flags and #flags > 0 then
-            state.views[1].cfg = with_flags(config, flags)
-            build(state.views[1])
+        if name or #flags > 0 then
+            set_source(state.views[1], name or state.views[1].source, flags)
         end
         return
     end
@@ -329,7 +373,7 @@ function M.open(flags)
 
     state = { views = {} }
     local group = vim.api.nvim_create_augroup(group_name, { clear = true })
-    new_view(with_flags(config, flags), "asmview", vim.api.nvim_get_current_win())
+    new_view(name or config.panes[1] or "output", flags, "asmview", vim.api.nvim_get_current_win())
 
     vim.api.nvim_create_autocmd("CursorMoved", {
         group = group,
@@ -365,28 +409,58 @@ function M.open(flags)
     attach(src_buf, file)
 end
 
-function M.compare(flags)
+function M.compare(args)
+    local name, flags = parse_args(args)
     if not state then
         M.open()
         if not state then
             return
         end
     end
-    local cfg = with_flags(vim.tbl_deep_extend("force", config, config.compare or {}), flags)
     if state.views[2] then
-        if flags and #flags > 0 then
-            state.views[2].cfg = cfg
-            build(state.views[2])
+        if name or #flags > 0 then
+            set_source(state.views[2], name or state.views[2].source, flags)
         else
             vim.api.nvim_buf_delete(state.views[2].buf, { force = true })
         end
         return
     end
     local main_win = vim.fn.bufwinid(state.views[1].buf)
-    local v = new_view(cfg, "asmview-compare", main_win, config.compare_split)
+    local v = new_view(name or config.panes[2] or "compile", flags, "asmview-compare", main_win, config.compare_split)
     name_view(v)
     set_view(v, { "loading " .. vim.fs.basename(state.file) .. "..." })
     build(v)
+end
+
+function M.source(args)
+    if not state then
+        vim.notify("asmview: open the view first", vim.log.levels.WARN)
+        return
+    end
+    local v = view_of(vim.api.nvim_get_current_buf()) or state.views[1]
+    local name, flags = parse_args(args)
+    if name or #flags > 0 then
+        set_source(v, name or v.source, flags)
+        return
+    end
+    vim.ui.select(source_names(), {
+        prompt = "asmview source for this pane",
+        format_item = function(n)
+            return n == v.source and n .. " (current)" or n
+        end,
+    }, function(choice)
+        if choice and state and view_of(v.buf) == v then
+            set_source(v, choice)
+        end
+    end)
+end
+
+M.complete = function(lead)
+    local items = source_names()
+    vim.list_extend(items, { "-O0", "-O1", "-O2", "-O3", "-Os", "-Oz", "-Og", "-march=native", "-fno-inline", "-funroll-loops", "-ffast-math" })
+    return vim.tbl_filter(function(f)
+        return f:sub(1, #lead) == lead
+    end, items)
 end
 
 local function popup(lines, title)

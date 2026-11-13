@@ -10,6 +10,7 @@ local config = {
     build = false,
     objdump = nil,
     object = nil,
+    compare = { build = true },
     c_fallback_flags = { "-O2" },
 }
 
@@ -27,28 +28,40 @@ function M.setup(opts)
     config = vim.tbl_deep_extend("force", config, opts or {})
 end
 
+local function view_of(buf)
+    for _, v in ipairs(state.views) do
+        if v.buf == buf then
+            return v
+        end
+    end
+end
+
 local function clear()
-    for _, buf in pairs({ state.src_buf, state.asm_buf }) do
-        if vim.api.nvim_buf_is_valid(buf) then
+    for _, buf in ipairs(vim.list_extend({ state.src_buf }, vim.tbl_map(function(v)
+        return v.buf
+    end, state.views))) do
+        if buf and vim.api.nvim_buf_is_valid(buf) then
             vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
         end
     end
 end
 
-local function note(line)
-    local text = config.explain and state.notes[line]
+local function note(v, line)
+    local text = config.explain and v.notes[line]
     if not text then
         return {}
     end
-    return { virt_text = { { "# " .. text, config.explain_highlight } }, virt_text_win_col = state.note_col }
+    return { virt_text = { { "# " .. text, config.explain_highlight } }, virt_text_win_col = v.note_col }
 end
 
-local function mark(buf, line)
-    local opts = { line_hl_group = config.highlight }
-    if buf == state.asm_buf then
-        opts = vim.tbl_extend("force", opts, note(line))
+local function mark_asm(v, line, hl)
+    local opts = note(v, line)
+    if hl then
+        opts.line_hl_group = config.highlight
     end
-    vim.api.nvim_buf_set_extmark(buf, ns, line - 1, 0, opts)
+    if next(opts) then
+        vim.api.nvim_buf_set_extmark(v.buf, ns, line - 1, 0, opts)
+    end
 end
 
 local function reveal(buf, line)
@@ -64,46 +77,43 @@ local function reveal(buf, line)
     end)
 end
 
-local function show_src_line(line)
+local function show_src_line(line, except)
     clear()
-    local asm_lines = state.src_to_asm[line]
-    if not asm_lines then
-        return
+    for _, v in ipairs(state.views) do
+        local asm_lines = v.src_to_asm[line]
+        if asm_lines then
+            for _, l in ipairs(asm_lines) do
+                mark_asm(v, l, true)
+            end
+            if v ~= except then
+                reveal(v.buf, asm_lines[1])
+            end
+        end
     end
-    for _, l in ipairs(asm_lines) do
-        mark(state.asm_buf, l)
-    end
-    return asm_lines
 end
 
 local function sync_from_src()
-    local asm_lines = show_src_line(vim.api.nvim_win_get_cursor(0)[1])
-    if asm_lines then
-        reveal(state.asm_buf, asm_lines[1])
-    end
+    show_src_line(vim.api.nvim_win_get_cursor(0)[1])
 end
 
-local function sync_from_asm()
+local function sync_from_asm(v)
     local line = vim.api.nvim_win_get_cursor(0)[1]
-    local src_line = state.asm_to_src[line]
+    local src_line = v.asm_to_src[line]
     if not src_line then
         clear()
-        if state.notes[line] then
-            vim.api.nvim_buf_set_extmark(state.asm_buf, ns, line - 1, 0, note(line))
-        end
+        mark_asm(v, line, false)
         return
     end
-    show_src_line(src_line)
-    mark(state.src_buf, src_line)
+    show_src_line(src_line, v)
+    vim.api.nvim_buf_set_extmark(state.src_buf, ns, src_line - 1, 0, { line_hl_group = config.highlight })
     reveal(state.src_buf, src_line)
 end
 
-local function set_view(lines, winbar)
-    local s = state
-    vim.bo[s.asm_buf].modifiable = true
-    vim.api.nvim_buf_set_lines(s.asm_buf, 0, -1, false, lines)
-    vim.bo[s.asm_buf].modifiable = false
-    local win = vim.fn.bufwinid(s.asm_buf)
+local function set_view(v, lines, winbar)
+    vim.bo[v.buf].modifiable = true
+    vim.api.nvim_buf_set_lines(v.buf, 0, -1, false, lines)
+    vim.bo[v.buf].modifiable = false
+    local win = vim.fn.bufwinid(v.buf)
     if win ~= -1 then
         vim.wo[win].winbar = winbar or ""
     end
@@ -111,16 +121,19 @@ end
 
 local build
 
-local function watch(path)
-    local s = state
-    if s.watched == path then
+local function unwatch(v)
+    if v.watcher then
+        v.watcher:close()
+        v.watcher = nil
+    end
+end
+
+local function watch(v, path)
+    if v.watched == path then
         return
     end
-    if s.watcher then
-        s.watcher:close()
-        s.watcher = nil
-    end
-    s.watched = path
+    unwatch(v)
+    v.watched = path
     if not path then
         return
     end
@@ -140,12 +153,12 @@ local function watch(path)
         end
         timer = vim.defer_fn(function()
             timer = nil
-            if state == s and s.watched == path then
-                build()
+            if state and view_of(v.buf) == v and v.watched == path then
+                build(v)
             end
         end, 300)
     end)
-    s.watcher = w
+    v.watcher = w
 end
 
 local function stale(obj, file)
@@ -153,73 +166,83 @@ local function stale(obj, file)
     return o and f and f.mtime.sec > o.mtime.sec
 end
 
-build = function()
+build = function(v)
     local s = state
-    s.gen = (s.gen or 0) + 1
-    local gen, file = s.gen, s.file
+    v.gen = (v.gen or 0) + 1
+    local gen, file = v.gen, s.file
     local backend = require(backends[s.filetype])
-    local job, err, missing = backend.command(s.file, config, s.filetype)
-    watch(job and job.object or missing)
+    local job, err, missing = backend.command(s.file, v.cfg, s.filetype)
+    watch(v, job and job.object or missing)
     if not job then
-        s.src_to_asm, s.asm_to_src, s.notes = {}, {}, {}
+        v.src_to_asm, v.asm_to_src, v.notes = {}, {}, {}
         clear()
-        set_view({ "asmview: " .. err })
+        set_view(v, { "asmview: " .. err })
         return
     end
     vim.system(job.cmd, { cwd = job.cwd, text = true }, vim.schedule_wrap(function(res)
-        if state ~= s or s.gen ~= gen or not vim.api.nvim_buf_is_valid(s.asm_buf) then
+        if state ~= s or v.gen ~= gen or view_of(v.buf) ~= v or not vim.api.nvim_buf_is_valid(v.buf) then
             return
         end
         if res.code ~= 0 then
-            set_view(vim.split("asmview: " .. job.cmd[1] .. " failed\n" .. (res.stderr or ""), "\n"))
+            set_view(v, vim.split("asmview: " .. job.cmd[1] .. " failed\n" .. (res.stderr or ""), "\n"))
             return
         end
         local out = job.stream == "stderr" and res.stderr or res.stdout
         local result = (job.parse or backend.parse)(out, file, job.cwd)
         local winbar
         if job.object then
-            winbar = " " .. vim.fn.fnamemodify(job.object, ":~:.")
+            v.label = vim.fn.fnamemodify(job.object, ":~:.")
+            winbar = " " .. v.label
             if stale(job.object, file) then
                 winbar = winbar .. "  %#WarningMsg#(older than source)"
             end
         else
-            winbar = " built by asmview"
+            v.label = "built by asmview"
+            winbar = " " .. v.label
         end
-        set_view(result.lines, winbar)
-        s.src_to_asm = result.src_to_asm
-        s.asm_to_src = result.asm_to_src
+        set_view(v, result.lines, winbar)
+        v.src_to_asm = result.src_to_asm
+        v.asm_to_src = result.asm_to_src
         local explain = require("asmview.explain")
         local dialect = result.dialect or explain.dialect(result.lines)
-        s.notes, s.note_col = {}, 0
+        v.notes, v.note_col = {}, 0
         for i, l in ipairs(result.lines) do
-            s.note_col = math.max(s.note_col, vim.fn.strdisplaywidth(l))
-            s.notes[i] = explain.line(l, dialect)
+            v.note_col = math.max(v.note_col, vim.fn.strdisplaywidth(l))
+            v.notes[i] = explain.line(l, dialect)
         end
-        s.note_col = s.note_col + 4
-        if vim.api.nvim_get_current_buf() == s.src_buf then
+        v.note_col = v.note_col + 4
+        local cur = vim.api.nvim_get_current_buf()
+        if cur == s.src_buf then
             sync_from_src()
-        elseif vim.api.nvim_get_current_buf() == s.asm_buf then
-            sync_from_asm()
+        elseif view_of(cur) then
+            sync_from_asm(view_of(cur))
         end
     end))
+end
+
+local function build_all()
+    for _, v in ipairs(state.views) do
+        build(v)
+    end
 end
 
 local function cleanup()
     if not state then
         return
     end
+    local s = state
     clear()
-    if state.watcher then
-        state.watcher:close()
-    end
     state = nil
     pcall(vim.api.nvim_del_augroup_by_name, group_name)
+    for _, v in ipairs(s.views) do
+        unwatch(v)
+        if vim.api.nvim_buf_is_valid(v.buf) then
+            vim.api.nvim_buf_delete(v.buf, { force = true })
+        end
+    end
 end
 
 function M.close()
-    if state and vim.api.nvim_buf_is_valid(state.asm_buf) then
-        vim.api.nvim_buf_delete(state.asm_buf, { force = true })
-    end
     cleanup()
 end
 
@@ -234,15 +257,50 @@ local function source_file(buf)
     return vim.uv.fs_realpath(file) or file
 end
 
+local function name_view(v)
+    pcall(vim.api.nvim_buf_set_name, v.buf, v.scheme .. "://" .. vim.fs.basename(state.file))
+end
+
 local function attach(buf, file)
     clear()
     state.src_buf = buf
     state.file = file
     state.filetype = vim.bo[buf].filetype
-    state.src_to_asm, state.asm_to_src, state.notes = {}, {}, {}
-    pcall(vim.api.nvim_buf_set_name, state.asm_buf, "asmview://" .. vim.fs.basename(file))
-    set_view({ "loading " .. vim.fs.basename(file) .. "..." })
-    build()
+    for _, v in ipairs(state.views) do
+        v.src_to_asm, v.asm_to_src, v.notes = {}, {}, {}
+        name_view(v)
+        set_view(v, { "loading " .. vim.fs.basename(file) .. "..." })
+    end
+    build_all()
+end
+
+local function new_view(cfg, scheme, win)
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[buf].filetype = "asm"
+    vim.bo[buf].bufhidden = "wipe"
+    vim.bo[buf].modifiable = false
+    local asm_win = vim.api.nvim_open_win(buf, false, { split = "right", win = win })
+    vim.wo[asm_win].wrap = false
+    local v = { buf = buf, cfg = cfg, scheme = scheme, src_to_asm = {}, asm_to_src = {}, notes = {}, note_col = 0 }
+    table.insert(state.views, v)
+    vim.api.nvim_create_autocmd("BufWipeout", {
+        group = group_name,
+        buffer = buf,
+        callback = function()
+            if not state then
+                return
+            end
+            if state.views[1] == v then
+                vim.schedule(cleanup)
+                return
+            end
+            unwatch(v)
+            state.views = vim.tbl_filter(function(x)
+                return x ~= v
+            end, state.views)
+        end,
+    })
+    return v
 end
 
 function M.open()
@@ -253,25 +311,17 @@ function M.open()
         return
     end
 
-    local src_win = vim.api.nvim_get_current_win()
-    local asm_buf = vim.api.nvim_create_buf(false, true)
-    vim.bo[asm_buf].filetype = "asm"
-    vim.bo[asm_buf].bufhidden = "wipe"
-    vim.bo[asm_buf].modifiable = false
-
-    local asm_win = vim.api.nvim_open_win(asm_buf, false, { split = "right", win = src_win })
-    vim.wo[asm_win].wrap = false
-
-    state = { asm_buf = asm_buf, note_col = 0 }
-
+    state = { views = {} }
     local group = vim.api.nvim_create_augroup(group_name, { clear = true })
+    new_view(config, "asmview", vim.api.nvim_get_current_win())
+
     vim.api.nvim_create_autocmd("CursorMoved", {
         group = group,
         callback = function(args)
             if args.buf == state.src_buf then
                 sync_from_src()
-            elseif args.buf == state.asm_buf then
-                sync_from_asm()
+            elseif view_of(args.buf) then
+                sync_from_asm(view_of(args.buf))
             end
         end,
     })
@@ -279,14 +329,14 @@ function M.open()
         group = group,
         callback = function(args)
             if args.buf == state.src_buf then
-                build()
+                build_all()
             end
         end,
     })
     vim.api.nvim_create_autocmd("BufEnter", {
         group = group,
         callback = function(args)
-            if args.buf == state.src_buf or args.buf == state.asm_buf then
+            if args.buf == state.src_buf or view_of(args.buf) then
                 return
             end
             local f = source_file(args.buf)
@@ -295,9 +345,26 @@ function M.open()
             end
         end,
     })
-    vim.api.nvim_create_autocmd("BufWipeout", { group = group, buffer = asm_buf, callback = cleanup })
 
     attach(src_buf, file)
+end
+
+function M.compare()
+    if not state then
+        M.open()
+        if not state then
+            return
+        end
+    end
+    if state.views[2] then
+        vim.api.nvim_buf_delete(state.views[2].buf, { force = true })
+        return
+    end
+    local main_win = vim.fn.bufwinid(state.views[1].buf)
+    local v = new_view(vim.tbl_deep_extend("force", config, config.compare or {}), "asmview-compare", main_win)
+    name_view(v)
+    set_view(v, { "loading " .. vim.fs.basename(state.file) .. "..." })
+    build(v)
 end
 
 local function popup(lines, title)
@@ -338,37 +405,51 @@ local function popup(lines, title)
     })
 end
 
-local function selection()
-    local buf = vim.api.nvim_get_current_buf()
-    local line = vim.api.nvim_win_get_cursor(0)[1]
-    local src_line, asm_lines
-    if buf == state.src_buf then
-        src_line = line
-    elseif buf == state.asm_buf then
-        src_line = state.asm_to_src[line]
-        if not src_line then
-            asm_lines = { line }
-        end
-    else
-        return
-    end
-    asm_lines = asm_lines or state.src_to_asm[src_line]
-    if not asm_lines then
-        return
-    end
-    local asm = {}
-    for _, l in ipairs(asm_lines) do
-        table.insert(asm, vim.trim(vim.api.nvim_buf_get_lines(state.asm_buf, l - 1, l, false)[1] or ""))
+local function asm_text(v, lines)
+    local out = {}
+    for _, l in ipairs(lines) do
+        table.insert(out, vim.trim(vim.api.nvim_buf_get_lines(v.buf, l - 1, l, false)[1] or ""))
     end
     local func
-    for l = asm_lines[1], 1, -1 do
-        local label = vim.api.nvim_buf_get_lines(state.asm_buf, l - 1, l, false)[1]:match("^([^%s.][^%s]*):$")
+    for l = lines[1], 1, -1 do
+        local label = (vim.api.nvim_buf_get_lines(v.buf, l - 1, l, false)[1] or ""):match("^([^%s.][^%s]*):$")
         if label then
             func = label
             break
         end
     end
-    return src_line, asm, func
+    return table.concat(out, "\n"), func
+end
+
+local function selection()
+    local buf = vim.api.nvim_get_current_buf()
+    local line = vim.api.nvim_win_get_cursor(0)[1]
+    local here = view_of(buf)
+    local src_line
+    if buf == state.src_buf then
+        src_line = line
+    elseif here then
+        src_line = here.asm_to_src[line]
+        if not src_line then
+            local text, func = asm_text(here, { line })
+            return nil, { { label = here.label, text = text } }, func
+        end
+    else
+        return
+    end
+    local parts, func = {}, nil
+    for _, v in ipairs(state.views) do
+        local lines = v.src_to_asm[src_line]
+        if lines then
+            local text, f = asm_text(v, lines)
+            func = func or f
+            table.insert(parts, { label = v.label, text = text })
+        end
+    end
+    if #parts == 0 then
+        return
+    end
+    return src_line, parts, func
 end
 
 local function context(src_line)
@@ -390,17 +471,23 @@ function M.ask()
         vim.notify("asmview: open the view first", vim.log.levels.WARN)
         return
     end
-    local src_line, asm, func = selection()
-    if not asm then
+    local src_line, parts, func = selection()
+    if not parts then
         vim.notify("asmview: no assembly for this line", vim.log.levels.WARN)
         return
     end
     local where = vim.fs.basename(state.file) .. (src_line and ":" .. src_line or "")
     local prompt = config.ai_prompt
+    if #parts > 1 then
+        prompt = prompt .. " The same source was compiled for different targets; compare the versions and point out meaningful differences."
+    end
+    prompt = prompt
         .. "\n\nFile: " .. state.file .. (src_line and ", line " .. src_line or "")
         .. (func and "\nFunction: " .. func or "")
         .. "\n\nSource (" .. state.filetype .. "):\n" .. context(src_line)
-        .. "\n\nAssembly:\n" .. table.concat(asm, "\n")
+    for _, p in ipairs(parts) do
+        prompt = prompt .. "\n\nAssembly (" .. (p.label or "?") .. "):\n" .. p.text
+    end
     local cmd = vim.deepcopy(config.ai_cmd)
     table.insert(cmd, prompt)
     vim.notify("asmview: asking " .. cmd[1] .. "...")

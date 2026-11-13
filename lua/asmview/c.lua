@@ -214,11 +214,19 @@ end
 function M.parse_objdump(output, file, cwd)
     local rows, pool = {}, {}
     local section, current = "", nil
+    local cache = {}
     local function same(path)
-        if path:sub(1, 1) ~= "/" then
-            path = cwd .. "/" .. path
+        if cache[path] == nil then
+            local full = path:sub(1, 1) == "/" and path or cwd .. "/" .. path
+            local match = realpath(full) == file
+            if not match and vim.fs.basename(path) == vim.fs.basename(file) then
+                local parts = vim.split(path, "/", { trimempty = true })
+                local tail = table.concat(parts, "/", math.max(1, #parts - 3))
+                match = #parts >= 2 and file:sub(-#tail - 1) == "/" .. tail
+            end
+            cache[path] = match
         end
-        return realpath(path) == file
+        return cache[path]
     end
 
     for l in output:gmatch("[^\n]*") do

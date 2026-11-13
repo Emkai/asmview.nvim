@@ -17,7 +17,7 @@ Side-by-side assembly view for C, C++ and Go. Compiles locally and highlights th
 
 `:AsmView` toggles the view. It rebuilds on `:w`.
 
-- C/C++: uses the file's entry in `compile_commands.json` (searched upward, also in `build/`), so cross compilers and project flags just work. Without an entry it runs `cc`/`c++` with `c_fallback_flags`.
+- C/C++: uses the file's entry in `compile_commands.json` (searched upward, also in `build/` and the `CompilationDatabase` set in `.clangd`), so cross compilers and project flags just work. Without an entry it runs `cc`/`c++` with `c_fallback_flags`.
 - Go: runs `go build -gcflags=-S` in the file's package and shows the functions defined in the file.
 
 ## Options

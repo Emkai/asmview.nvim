@@ -41,9 +41,32 @@ local function shell_split(cmd)
     return args
 end
 
+local function clangd_db(dir)
+    local f = io.open(dir .. "/.clangd")
+    if not f then
+        return
+    end
+    local text = f:read("*a")
+    f:close()
+    local path = text:match("CompilationDatabase:%s*['\"]?([^'\"\n#]-)['\"]?%s*\n")
+        or text:match("CompilationDatabase:%s*['\"]?([^'\"\n#]-)['\"]?%s*$")
+    if not path or path == "" or path == "None" or path == "Ancestors" then
+        return
+    end
+    if path:sub(1, 1) ~= "/" then
+        path = dir .. "/" .. path
+    end
+    return path .. "/compile_commands.json"
+end
+
 local function find_db(file)
     for dir in vim.fs.parents(file) do
-        for _, candidate in ipairs({ dir .. "/compile_commands.json", dir .. "/build/compile_commands.json" }) do
+        local candidates = { dir .. "/compile_commands.json", dir .. "/build/compile_commands.json" }
+        local from_clangd = clangd_db(dir)
+        if from_clangd then
+            table.insert(candidates, 1, from_clangd)
+        end
+        for _, candidate in ipairs(candidates) do
             if vim.uv.fs_stat(candidate) then
                 return candidate
             end

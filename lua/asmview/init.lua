@@ -2,6 +2,8 @@ local M = {}
 
 local config = {
     highlight = "Visual",
+    explain = true,
+    explain_highlight = "Comment",
     c_fallback_flags = { "-O2" },
 }
 
@@ -12,6 +14,7 @@ local backends = {
 }
 
 local ns = vim.api.nvim_create_namespace("asmview")
+local explain_ns = vim.api.nvim_create_namespace("asmview_explain")
 local group_name = "asmview"
 local state
 
@@ -63,7 +66,30 @@ local function sync_from_src()
     end
 end
 
+local function clear_explain()
+    if state and vim.api.nvim_buf_is_valid(state.asm_buf) then
+        vim.api.nvim_buf_clear_namespace(state.asm_buf, explain_ns, 0, -1)
+    end
+end
+
+local function show_explain()
+    clear_explain()
+    if not config.explain then
+        return
+    end
+    local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+    local text = vim.api.nvim_buf_get_lines(state.asm_buf, row, row + 1, false)[1]
+    local desc = text and require("asmview.explain").line(text)
+    if desc then
+        vim.api.nvim_buf_set_extmark(state.asm_buf, explain_ns, row, 0, {
+            virt_text = { { "    " .. desc, config.explain_highlight } },
+            virt_text_pos = "eol",
+        })
+    end
+end
+
 local function sync_from_asm()
+    show_explain()
     local src_line = state.asm_to_src[vim.api.nvim_win_get_cursor(0)[1]]
     if not src_line then
         clear()
@@ -99,6 +125,8 @@ local function build()
         s.asm_to_src = result.asm_to_src
         if vim.api.nvim_get_current_buf() == s.src_buf then
             sync_from_src()
+        elseif vim.api.nvim_get_current_buf() == s.asm_buf then
+            show_explain()
         end
     end))
 end
@@ -155,6 +183,7 @@ function M.open()
     local group = vim.api.nvim_create_augroup(group_name, { clear = true })
     vim.api.nvim_create_autocmd("CursorMoved", { group = group, buffer = src_buf, callback = sync_from_src })
     vim.api.nvim_create_autocmd("CursorMoved", { group = group, buffer = asm_buf, callback = sync_from_asm })
+    vim.api.nvim_create_autocmd("BufLeave", { group = group, buffer = asm_buf, callback = clear_explain })
     vim.api.nvim_create_autocmd("BufWritePost", { group = group, buffer = src_buf, callback = build })
     vim.api.nvim_create_autocmd("BufWipeout", { group = group, buffer = asm_buf, callback = cleanup })
 

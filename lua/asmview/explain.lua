@@ -62,8 +62,16 @@ local function opnd(kind, text, extra)
     return vim.tbl_extend("force", { kind = kind, text = text }, extra or {})
 end
 
+local function dec(v)
+    local sign, hex = v:match("^(%-?)0x(%x+)$")
+    if hex and #hex <= 8 then
+        return sign .. tonumber(hex, 16)
+    end
+    return v
+end
+
 local function mem(disp, base, idx, scale)
-    disp = (disp or ""):gsub("^(%-?%d+)%+(.+)$", "%2+%1")
+    disp = dec((disp or ""):gsub("^(%-?%d+)%+(.+)$", "%2+%1"))
     local terms = {}
     if base and base ~= "" then
         table.insert(terms, base)
@@ -94,7 +102,7 @@ local function att_operand(o)
         return opnd("indirect", "address in " .. att_operand(o:sub(2)).text)
     elseif c == "$" then
         local v = o:sub(2)
-        return opnd("imm", v:match("^[%a_.]") and "address of " .. v or v)
+        return opnd("imm", v:match("^[%a_.]") and "address of " .. v or dec(v))
     elseif c == "%" then
         return opnd("reg", o:sub(2))
     end
@@ -137,7 +145,8 @@ local function arm_operand(o)
     if c == "#" then
         return opnd("imm", o:sub(2))
     elseif c == "=" then
-        return opnd("literal", o:sub(2))
+        local v = o:sub(2)
+        return opnd("literal", v:match("^[%a_.]") and "address of " .. v or v)
     elseif c == "{" then
         return opnd("list", (o:sub(2, -2):gsub("%s*,%s*", ", ")))
     elseif c == "[" then
@@ -261,8 +270,9 @@ local function movlike(o, d)
         return "load " .. t(src) .. " into " .. t(dst)
     elseif src.kind == "imm" or src.kind == "literal" then
         return "set " .. t(dst) .. " to " .. t(src)
-    elseif src.text == dst.text and d.size == "l" then
-        return "clear upper 32 bits of " .. t(dst)
+    elseif src.text == dst.text and (d.size == "l" or src.text:match("^e%a%a$") or src.text:match("^r%d+d$")) then
+        local full = dst.text:gsub("^e(%a%a)$", "r%1"):gsub("^(r%d+)d$", "%1")
+        return "clear upper 32 bits of " .. full
     end
     return "copy " .. t(src) .. " into " .. t(dst)
 end
@@ -668,7 +678,7 @@ function M.dialect(lines)
 end
 
 function M.line(text, dialect)
-    local s = vim.trim(text):gsub("^%d+%s+", "")
+    local s = vim.trim(text):gsub("^%x+:%s+", ""):gsub("^%d+%s+", "")
     if s == "" or s:match(":$") then
         return nil
     end
@@ -680,6 +690,9 @@ function M.line(text, dialect)
     if (op == "lock" or op == "rep" or op == "notrack") and rest ~= "" then
         local inner = M.line(rest, dialect)
         return inner and (op == "lock" and "atomically " or "") .. inner or fixed.lock
+    end
+    if op:sub(1, 1) == "." then
+        return nil
     end
     local d
     if dialect == "arm" then

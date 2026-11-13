@@ -7,6 +7,9 @@ local config = {
     ai_cmd = { "claude", "-p" },
     ai_prompt = "Below is the assembly the compiler generated for the source line marked >>, with the surrounding code for context. Explain in a short summary what the assembly does.",
     ai_context_lines = 20,
+    build = false,
+    objdump = nil,
+    object = nil,
     c_fallback_flags = { "-O2" },
 }
 
@@ -95,14 +98,72 @@ local function sync_from_asm()
     reveal(state.src_buf, src_line)
 end
 
-local function build()
+local function set_view(lines, winbar)
+    local s = state
+    vim.bo[s.asm_buf].modifiable = true
+    vim.api.nvim_buf_set_lines(s.asm_buf, 0, -1, false, lines)
+    vim.bo[s.asm_buf].modifiable = false
+    local win = vim.fn.bufwinid(s.asm_buf)
+    if win ~= -1 then
+        vim.wo[win].winbar = winbar or ""
+    end
+end
+
+local build
+
+local function watch(path)
+    local s = state
+    if s.watched == path then
+        return
+    end
+    if s.watcher then
+        s.watcher:close()
+        s.watcher = nil
+    end
+    s.watched = path
+    if not path then
+        return
+    end
+    local w = vim.uv.new_fs_event()
+    if not w then
+        return
+    end
+    local name = vim.fs.basename(path)
+    local timer
+    w:start(vim.fs.dirname(path), {}, function(_, fname)
+        if fname ~= name then
+            return
+        end
+        if timer then
+            timer:stop()
+            timer:close()
+        end
+        timer = vim.defer_fn(function()
+            timer = nil
+            if state == s and s.watched == path then
+                build()
+            end
+        end, 300)
+    end)
+    s.watcher = w
+end
+
+local function stale(obj, file)
+    local o, f = vim.uv.fs_stat(obj), vim.uv.fs_stat(file)
+    return o and f and f.mtime.sec > o.mtime.sec
+end
+
+build = function()
     local s = state
     s.gen = (s.gen or 0) + 1
     local gen, file = s.gen, s.file
     local backend = require(backends[s.filetype])
-    local job, err = backend.command(s.file, config, s.filetype)
+    local job, err, missing = backend.command(s.file, config, s.filetype)
+    watch(job and job.object or missing)
     if not job then
-        vim.notify("asmview: " .. err, vim.log.levels.ERROR)
+        s.src_to_asm, s.asm_to_src, s.notes = {}, {}, {}
+        clear()
+        set_view({ "asmview: " .. err })
         return
     end
     vim.system(job.cmd, { cwd = job.cwd, text = true }, vim.schedule_wrap(function(res)
@@ -110,14 +171,21 @@ local function build()
             return
         end
         if res.code ~= 0 then
-            vim.notify("asmview: build failed\n" .. (res.stderr or ""), vim.log.levels.ERROR)
+            set_view(vim.split("asmview: " .. job.cmd[1] .. " failed\n" .. (res.stderr or ""), "\n"))
             return
         end
         local out = job.stream == "stderr" and res.stderr or res.stdout
-        local result = backend.parse(out, file, job.cwd)
-        vim.bo[s.asm_buf].modifiable = true
-        vim.api.nvim_buf_set_lines(s.asm_buf, 0, -1, false, result.lines)
-        vim.bo[s.asm_buf].modifiable = false
+        local result = (job.parse or backend.parse)(out, file, job.cwd)
+        local winbar
+        if job.object then
+            winbar = " " .. vim.fn.fnamemodify(job.object, ":~:.")
+            if stale(job.object, file) then
+                winbar = winbar .. "  %#WarningMsg#(older than source)"
+            end
+        else
+            winbar = " built by asmview"
+        end
+        set_view(result.lines, winbar)
         s.src_to_asm = result.src_to_asm
         s.asm_to_src = result.asm_to_src
         local explain = require("asmview.explain")
@@ -141,6 +209,9 @@ local function cleanup()
         return
     end
     clear()
+    if state.watcher then
+        state.watcher:close()
+    end
     state = nil
     pcall(vim.api.nvim_del_augroup_by_name, group_name)
 end
@@ -170,9 +241,7 @@ local function attach(buf, file)
     state.filetype = vim.bo[buf].filetype
     state.src_to_asm, state.asm_to_src, state.notes = {}, {}, {}
     pcall(vim.api.nvim_buf_set_name, state.asm_buf, "asmview://" .. vim.fs.basename(file))
-    vim.bo[state.asm_buf].modifiable = true
-    vim.api.nvim_buf_set_lines(state.asm_buf, 0, -1, false, { "building " .. vim.fs.basename(file) .. "..." })
-    vim.bo[state.asm_buf].modifiable = false
+    set_view({ "loading " .. vim.fs.basename(file) .. "..." })
     build()
 end
 

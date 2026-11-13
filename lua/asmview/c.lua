@@ -114,8 +114,43 @@ local function rewrite(args)
     return out
 end
 
-function M.command(file, config, filetype)
-    local entry = find_entry(file)
+local function object_path(entry)
+    local out = entry.output
+    if not out then
+        local args = entry.arguments or shell_split(entry.command)
+        for i, a in ipairs(args) do
+            if a == "-o" then
+                out = args[i + 1]
+            elseif a:match("^%-o.") then
+                out = a:sub(3)
+            end
+        end
+    end
+    if out and out:sub(1, 1) ~= "/" then
+        out = entry.directory .. "/" .. out
+    end
+    return out
+end
+
+local function objdump_for(obj, config)
+    if config.objdump then
+        return config.objdump
+    end
+    local f = io.open(obj, "rb")
+    local head = f and f:read(20) or ""
+    if f then
+        f:close()
+    end
+    local machine = #head >= 20 and head:byte(19) + head:byte(20) * 256
+    if machine == 0x28 and vim.fn.executable("arm-none-eabi-objdump") == 1 then
+        return "arm-none-eabi-objdump"
+    elseif machine == 0xB7 and vim.fn.executable("aarch64-linux-gnu-objdump") == 1 then
+        return "aarch64-linux-gnu-objdump"
+    end
+    return "objdump"
+end
+
+local function build_command(file, config, filetype, entry)
     if entry then
         local args = entry.arguments or shell_split(entry.command)
         return { cmd = rewrite(args), cwd = entry.directory, stream = "stdout" }
@@ -126,6 +161,137 @@ function M.command(file, config, filetype)
     vim.list_extend(cmd, asm_flags)
     table.insert(cmd, file)
     return { cmd = cmd, cwd = vim.fs.dirname(file), stream = "stdout" }
+end
+
+function M.command(file, config, filetype)
+    local entry = find_entry(file)
+    if config.build then
+        return build_command(file, config, filetype, entry)
+    end
+    local obj = entry and object_path(entry)
+    if config.object then
+        obj = config.object(obj, file, entry)
+    end
+    if not obj then
+        return nil, "no compile_commands.json entry for " .. vim.fs.basename(file) .. " (set build = true to compile it here)"
+    end
+    if not vim.uv.fs_stat(obj) then
+        return nil, "no object file at " .. obj .. " (build the project, or set build = true)", obj
+    end
+    return {
+        cmd = { objdump_for(obj, config), "-drlw", "--no-show-raw-insn", obj },
+        cwd = entry and entry.directory or vim.fs.dirname(obj),
+        stream = "stdout",
+        parse = M.parse_objdump,
+        object = obj,
+    }
+end
+
+local function short_sym(sym)
+    return (sym:gsub("^%.%a+%.([%a_])", "%1"))
+end
+
+local function resolve(reloc, next_addr)
+    local name, sign, hex = reloc.sym:match("^(.-)([%+%-])0x(%x+)$")
+    local add = 0
+    if name then
+        add = tonumber(hex, 16) * (sign == "-" and -1 or 1)
+    else
+        name = reloc.sym
+    end
+    if reloc.type:match("^R_X86_64_") and (reloc.type:match("PC") or reloc.type:match("PLT")) then
+        add = add + ((next_addr or reloc.addr + 4) - reloc.addr)
+    end
+    name = short_sym(name)
+    if add > 0 then
+        return name .. "+" .. add
+    elseif add < 0 then
+        return name .. add
+    end
+    return name
+end
+
+function M.parse_objdump(output, file, cwd)
+    local rows, pool = {}, {}
+    local section, current = "", nil
+    local function same(path)
+        if path:sub(1, 1) ~= "/" then
+            path = cwd .. "/" .. path
+        end
+        return realpath(path) == file
+    end
+
+    for l in output:gmatch("[^\n]*") do
+        local sec = l:match("^Disassembly of section (%S+):")
+        local func = l:match("^%x+ <(.+)>:$")
+        local raddr, rtype, rsym = l:match("^%s+(%x+):%s+(R_[%w_]+)%s+(%S+)$")
+        local path, ln = l:match("^(%S.-):(%d+) %(discriminator %d+%)$")
+        if not path then
+            path, ln = l:match("^(%S.-):(%d+)$")
+        end
+        if sec then
+            section, current = sec, nil
+        elseif func then
+            table.insert(rows, { label = func })
+        elseif raddr then
+            pool[section .. ":" .. tonumber(raddr, 16)] = short_sym(rsym)
+        elseif path and not l:match("^%x+ <") then
+            current = same(path) and tonumber(ln) or nil
+        else
+            local addr, text = l:match("^%s*(%x+):%s+(.+)$")
+            if addr then
+                local row = { section = section, addr = tonumber(addr, 16), src = current }
+                local body, ra, rt, rs = text:match("^(.-)\t(%x+): (R_[%w_]+)\t(%S+)$")
+                if body then
+                    text = body
+                    row.reloc = { addr = tonumber(ra, 16), type = rt, sym = rs }
+                end
+                row.pc_target = text:match("@ %(?(%x+) <")
+                text = text:gsub("%s+# .*$", ""):gsub("%s+@ .*$", ""):gsub("%s+", " ")
+                row.text = vim.trim(text)
+                table.insert(rows, row)
+            end
+        end
+    end
+
+    local lines, src_to_asm, asm_to_src = {}, {}, {}
+    for i, row in ipairs(rows) do
+        if row.label then
+            if #lines > 0 then
+                table.insert(lines, "")
+            end
+            table.insert(lines, row.label .. ":")
+        else
+            local text = row.text
+            local nxt = rows[i + 1]
+            if row.reloc then
+                local sym = resolve(row.reloc, nxt and nxt.section == row.section and nxt.addr or nil)
+                if text:find("(%rip)", 1, true) then
+                    text = text:gsub("%-?0x%x+%(%%rip%)", sym .. "(%%rip)", 1)
+                elseif text:find("%x+ <[^>]*>") then
+                    text = text:gsub("%x+ <[^>]*>", sym, 1)
+                elseif text:find("%$0x0") then
+                    text = text:gsub("%$0x0", "$" .. sym, 1)
+                else
+                    text = text .. " <" .. sym .. ">"
+                end
+            elseif text:match("^%.word") and pool[row.section .. ":" .. row.addr] then
+                text = ".word " .. pool[row.section .. ":" .. row.addr]
+            end
+            if row.pc_target then
+                local sym = pool[row.section .. ":" .. tonumber(row.pc_target, 16)]
+                text = text:gsub("%[pc, #%-?%d+%]", sym and "=" .. sym or "[" .. row.pc_target .. "]", 1)
+            end
+            text = text:gsub("(%x+) <[^>]*>", "%1")
+            table.insert(lines, string.format("%6x:  %s", row.addr, text))
+            if row.src then
+                asm_to_src[#lines] = row.src
+                src_to_asm[row.src] = src_to_asm[row.src] or {}
+                table.insert(src_to_asm[row.src], #lines)
+            end
+        end
+    end
+    return { lines = lines, src_to_asm = src_to_asm, asm_to_src = asm_to_src }
 end
 
 local function quoted(s)

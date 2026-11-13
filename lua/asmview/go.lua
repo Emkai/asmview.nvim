@@ -48,7 +48,7 @@ function M.parse(output, file)
         end
     end
 
-    return { lines = lines, src_to_asm = src_to_asm, asm_to_src = asm_to_src }
+    return { lines = lines, src_to_asm = src_to_asm, asm_to_src = asm_to_src, dialect = "go" }
 end
 
 return M

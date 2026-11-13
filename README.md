@@ -15,7 +15,7 @@ Side-by-side assembly view for C, C++ and Go. Compiles locally and highlights th
 
 ## Usage
 
-`:AsmView` toggles the view. It rebuilds on `:w`. The line under the cursor in the assembly view gets a short explanation of its instruction (x86, Go and ARM).
+`:AsmView` toggles the view. It rebuilds on `:w`. Highlighted assembly rows and the cursor row get an aligned `# ...` note saying what the instruction does with its operands, e.g. `# multiply xmm0 by [rsp+8] (double)` (x86, Go and ARM).
 
 - C/C++: uses the file's entry in `compile_commands.json` (searched upward, also in `build/` and the `CompilationDatabase` set in `.clangd`), so cross compilers and project flags just work. Without an entry it runs `cc`/`c++` with `c_fallback_flags`.
 - Go: runs `go build -gcflags=-S` in the file's package and shows the functions defined in the file.

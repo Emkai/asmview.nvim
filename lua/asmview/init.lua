@@ -14,7 +14,6 @@ local backends = {
 }
 
 local ns = vim.api.nvim_create_namespace("asmview")
-local explain_ns = vim.api.nvim_create_namespace("asmview_explain")
 local group_name = "asmview"
 local state
 
@@ -30,8 +29,20 @@ local function clear()
     end
 end
 
+local function note(line)
+    local text = config.explain and state.notes[line]
+    if not text then
+        return {}
+    end
+    return { virt_text = { { "# " .. text, config.explain_highlight } }, virt_text_win_col = state.note_col }
+end
+
 local function mark(buf, line)
-    vim.api.nvim_buf_set_extmark(buf, ns, line - 1, 0, { line_hl_group = config.highlight })
+    local opts = { line_hl_group = config.highlight }
+    if buf == state.asm_buf then
+        opts = vim.tbl_extend("force", opts, note(line))
+    end
+    vim.api.nvim_buf_set_extmark(buf, ns, line - 1, 0, opts)
 end
 
 local function reveal(buf, line)
@@ -66,33 +77,14 @@ local function sync_from_src()
     end
 end
 
-local function clear_explain()
-    if state and vim.api.nvim_buf_is_valid(state.asm_buf) then
-        vim.api.nvim_buf_clear_namespace(state.asm_buf, explain_ns, 0, -1)
-    end
-end
-
-local function show_explain()
-    clear_explain()
-    if not config.explain then
-        return
-    end
-    local row = vim.api.nvim_win_get_cursor(0)[1] - 1
-    local text = vim.api.nvim_buf_get_lines(state.asm_buf, row, row + 1, false)[1]
-    local desc = text and require("asmview.explain").line(text)
-    if desc then
-        vim.api.nvim_buf_set_extmark(state.asm_buf, explain_ns, row, 0, {
-            virt_text = { { "    " .. desc, config.explain_highlight } },
-            virt_text_pos = "eol",
-        })
-    end
-end
-
 local function sync_from_asm()
-    show_explain()
-    local src_line = state.asm_to_src[vim.api.nvim_win_get_cursor(0)[1]]
+    local line = vim.api.nvim_win_get_cursor(0)[1]
+    local src_line = state.asm_to_src[line]
     if not src_line then
         clear()
+        if state.notes[line] then
+            vim.api.nvim_buf_set_extmark(state.asm_buf, ns, line - 1, 0, note(line))
+        end
         return
     end
     show_src_line(src_line)
@@ -123,10 +115,18 @@ local function build()
         vim.bo[s.asm_buf].modifiable = false
         s.src_to_asm = result.src_to_asm
         s.asm_to_src = result.asm_to_src
+        local explain = require("asmview.explain")
+        local dialect = result.dialect or explain.dialect(result.lines)
+        s.notes, s.note_col = {}, 0
+        for i, l in ipairs(result.lines) do
+            s.note_col = math.max(s.note_col, vim.fn.strdisplaywidth(l))
+            s.notes[i] = explain.line(l, dialect)
+        end
+        s.note_col = s.note_col + 4
         if vim.api.nvim_get_current_buf() == s.src_buf then
             sync_from_src()
         elseif vim.api.nvim_get_current_buf() == s.asm_buf then
-            show_explain()
+            sync_from_asm()
         end
     end))
 end
@@ -178,12 +178,13 @@ function M.open()
         filetype = filetype,
         src_to_asm = {},
         asm_to_src = {},
+        notes = {},
+        note_col = 0,
     }
 
     local group = vim.api.nvim_create_augroup(group_name, { clear = true })
     vim.api.nvim_create_autocmd("CursorMoved", { group = group, buffer = src_buf, callback = sync_from_src })
     vim.api.nvim_create_autocmd("CursorMoved", { group = group, buffer = asm_buf, callback = sync_from_asm })
-    vim.api.nvim_create_autocmd("BufLeave", { group = group, buffer = asm_buf, callback = clear_explain })
     vim.api.nvim_create_autocmd("BufWritePost", { group = group, buffer = src_buf, callback = build })
     vim.api.nvim_create_autocmd("BufWipeout", { group = group, buffer = asm_buf, callback = cleanup })
 

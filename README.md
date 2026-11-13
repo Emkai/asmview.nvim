@@ -18,7 +18,7 @@ Side-by-side assembly view for C, C++ and Go. Compiles locally and highlights th
 
 ## Usage
 
-`:AsmView` toggles the view. It rebuilds on `:w`. Highlighted assembly rows and the cursor row get an aligned `# ...` note saying what the instruction does with its operands, e.g. `# multiply xmm0 by [rsp+8] (double)` (x86, Go and ARM).
+`:AsmView` toggles the view. It rebuilds on `:w` and follows you to other C, C++ and Go buffers. Highlighted assembly rows and the cursor row get an aligned `# ...` note saying what the instruction does with its operands, e.g. `# multiply xmm0 by [rsp+8] (double)` (x86, Go and ARM).
 
 `require("asmview").ask()` sends the highlighted assembly, its source line with `ai_context_lines` of surrounding code, and the function name to `ai_cmd` (default `claude -p`) and shows the answer in a popup. Close it with `q` or `<Esc>`.
 

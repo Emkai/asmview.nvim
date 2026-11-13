@@ -25,7 +25,7 @@ function M.setup(opts)
 end
 
 local function clear()
-    for _, buf in ipairs({ state.src_buf, state.asm_buf }) do
+    for _, buf in pairs({ state.src_buf, state.asm_buf }) do
         if vim.api.nvim_buf_is_valid(buf) then
             vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
         end
@@ -97,6 +97,8 @@ end
 
 local function build()
     local s = state
+    s.gen = (s.gen or 0) + 1
+    local gen, file = s.gen, s.file
     local backend = require(backends[s.filetype])
     local job, err = backend.command(s.file, config, s.filetype)
     if not job then
@@ -104,7 +106,7 @@ local function build()
         return
     end
     vim.system(job.cmd, { cwd = job.cwd, text = true }, vim.schedule_wrap(function(res)
-        if state ~= s or not vim.api.nvim_buf_is_valid(s.asm_buf) then
+        if state ~= s or s.gen ~= gen or not vim.api.nvim_buf_is_valid(s.asm_buf) then
             return
         end
         if res.code ~= 0 then
@@ -112,7 +114,7 @@ local function build()
             return
         end
         local out = job.stream == "stderr" and res.stderr or res.stdout
-        local result = backend.parse(out, s.file, job.cwd)
+        local result = backend.parse(out, file, job.cwd)
         vim.bo[s.asm_buf].modifiable = true
         vim.api.nvim_buf_set_lines(s.asm_buf, 0, -1, false, result.lines)
         vim.bo[s.asm_buf].modifiable = false
@@ -150,48 +152,83 @@ function M.close()
     cleanup()
 end
 
+local function source_file(buf)
+    if not backends[vim.bo[buf].filetype] or vim.bo[buf].buftype ~= "" then
+        return
+    end
+    local file = vim.api.nvim_buf_get_name(buf)
+    if file == "" then
+        return
+    end
+    return vim.uv.fs_realpath(file) or file
+end
+
+local function attach(buf, file)
+    clear()
+    state.src_buf = buf
+    state.file = file
+    state.filetype = vim.bo[buf].filetype
+    state.src_to_asm, state.asm_to_src, state.notes = {}, {}, {}
+    pcall(vim.api.nvim_buf_set_name, state.asm_buf, "asmview://" .. vim.fs.basename(file))
+    vim.bo[state.asm_buf].modifiable = true
+    vim.api.nvim_buf_set_lines(state.asm_buf, 0, -1, false, { "building " .. vim.fs.basename(file) .. "..." })
+    vim.bo[state.asm_buf].modifiable = false
+    build()
+end
+
 function M.open()
     local src_buf = vim.api.nvim_get_current_buf()
-    local filetype = vim.bo[src_buf].filetype
-    if not backends[filetype] then
-        vim.notify("asmview: unsupported filetype " .. filetype, vim.log.levels.WARN)
+    local file = source_file(src_buf)
+    if not file then
+        vim.notify("asmview: unsupported buffer (" .. vim.bo[src_buf].filetype .. ")", vim.log.levels.WARN)
         return
     end
-    local file = vim.api.nvim_buf_get_name(src_buf)
-    if file == "" then
-        vim.notify("asmview: buffer has no file", vim.log.levels.WARN)
-        return
-    end
-    file = vim.uv.fs_realpath(file) or file
 
     local src_win = vim.api.nvim_get_current_win()
     local asm_buf = vim.api.nvim_create_buf(false, true)
     vim.bo[asm_buf].filetype = "asm"
     vim.bo[asm_buf].bufhidden = "wipe"
     vim.bo[asm_buf].modifiable = false
-    vim.api.nvim_buf_set_name(asm_buf, "asmview://" .. vim.fs.basename(file))
 
     local asm_win = vim.api.nvim_open_win(asm_buf, false, { split = "right", win = src_win })
     vim.wo[asm_win].wrap = false
 
-    state = {
-        src_buf = src_buf,
-        asm_buf = asm_buf,
-        file = file,
-        filetype = filetype,
-        src_to_asm = {},
-        asm_to_src = {},
-        notes = {},
-        note_col = 0,
-    }
+    state = { asm_buf = asm_buf, note_col = 0 }
 
     local group = vim.api.nvim_create_augroup(group_name, { clear = true })
-    vim.api.nvim_create_autocmd("CursorMoved", { group = group, buffer = src_buf, callback = sync_from_src })
-    vim.api.nvim_create_autocmd("CursorMoved", { group = group, buffer = asm_buf, callback = sync_from_asm })
-    vim.api.nvim_create_autocmd("BufWritePost", { group = group, buffer = src_buf, callback = build })
+    vim.api.nvim_create_autocmd("CursorMoved", {
+        group = group,
+        callback = function(args)
+            if args.buf == state.src_buf then
+                sync_from_src()
+            elseif args.buf == state.asm_buf then
+                sync_from_asm()
+            end
+        end,
+    })
+    vim.api.nvim_create_autocmd("BufWritePost", {
+        group = group,
+        callback = function(args)
+            if args.buf == state.src_buf then
+                build()
+            end
+        end,
+    })
+    vim.api.nvim_create_autocmd("BufEnter", {
+        group = group,
+        callback = function(args)
+            if args.buf == state.src_buf or args.buf == state.asm_buf then
+                return
+            end
+            local f = source_file(args.buf)
+            if f then
+                attach(args.buf, f)
+            end
+        end,
+    })
     vim.api.nvim_create_autocmd("BufWipeout", { group = group, buffer = asm_buf, callback = cleanup })
 
-    build()
+    attach(src_buf, file)
 end
 
 local function popup(lines, title)

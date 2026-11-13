@@ -2,9 +2,10 @@ local M = {}
 
 local noise = { TEXT = true, PCDATA = true, FUNCDATA = true }
 
-function M.command(file)
+function M.command(file, config)
+    local gcflags = table.concat(vim.list_extend({ "-S" }, config.extra_flags or {}), " ")
     return {
-        cmd = { "go", "build", "-gcflags=-S", "-o", vim.fn.has("win32") == 1 and "NUL" or "/dev/null", "." },
+        cmd = { "go", "build", "-gcflags=" .. gcflags, "-o", vim.fn.has("win32") == 1 and "NUL" or "/dev/null", "." },
         cwd = vim.fs.dirname(file),
         stream = "stderr",
     }

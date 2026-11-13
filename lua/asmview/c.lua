@@ -98,7 +98,7 @@ local drop_with_value = { ["-o"] = true, ["-MF"] = true, ["-MT"] = true, ["-MQ"]
 local drop = { ["-c"] = true, ["-MD"] = true, ["-MMD"] = true, ["-M"] = true, ["-MM"] = true }
 local launchers = { ccache = true, sccache = true }
 
-local function rewrite(args)
+local function rewrite(args, extra)
     local out, skip = {}, false
     for i, arg in ipairs(args) do
         if skip then
@@ -110,6 +110,7 @@ local function rewrite(args)
             table.insert(out, arg)
         end
     end
+    vim.list_extend(out, extra or {})
     vim.list_extend(out, asm_flags)
     return out
 end
@@ -153,11 +154,12 @@ end
 local function build_command(file, config, filetype, entry)
     if entry then
         local args = entry.arguments or shell_split(entry.command)
-        return { cmd = rewrite(args), cwd = entry.directory, stream = "stdout" }
+        return { cmd = rewrite(args, config.extra_flags), cwd = entry.directory, stream = "stdout" }
     end
     local compiler = filetype == "cpp" and "c++" or "cc"
     local cmd = { compiler }
     vim.list_extend(cmd, config.c_fallback_flags)
+    vim.list_extend(cmd, config.extra_flags or {})
     vim.list_extend(cmd, asm_flags)
     table.insert(cmd, file)
     return { cmd = cmd, cwd = vim.fs.dirname(file), stream = "stdout" }

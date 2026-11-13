@@ -8,6 +8,7 @@ local config = {
     ai_prompt = "Below is the assembly the compiler generated for the source line marked >>, with the surrounding code for context. Explain in a short summary what the assembly does.",
     ai_context_lines = 20,
     build = false,
+    extra_flags = {},
     objdump = nil,
     object = nil,
     compare = { build = true },
@@ -198,7 +199,7 @@ build = function(v)
                 winbar = winbar .. "  %#WarningMsg#(older than source)"
             end
         else
-            v.label = "built by asmview"
+            v.label = "built by asmview" .. (#(v.cfg.extra_flags or {}) > 0 and " " .. table.concat(v.cfg.extra_flags, " ") or "")
             winbar = " " .. v.label
         end
         set_view(v, result.lines, winbar)
@@ -304,7 +305,21 @@ local function new_view(cfg, scheme, win, split)
     return v
 end
 
-function M.open()
+local function with_flags(cfg, flags)
+    if not flags or #flags == 0 then
+        return cfg
+    end
+    return vim.tbl_extend("force", cfg, { build = true, extra_flags = flags })
+end
+
+function M.open(flags)
+    if state then
+        if flags and #flags > 0 then
+            state.views[1].cfg = with_flags(config, flags)
+            build(state.views[1])
+        end
+        return
+    end
     local src_buf = vim.api.nvim_get_current_buf()
     local file = source_file(src_buf)
     if not file then
@@ -314,7 +329,7 @@ function M.open()
 
     state = { views = {} }
     local group = vim.api.nvim_create_augroup(group_name, { clear = true })
-    new_view(config, "asmview", vim.api.nvim_get_current_win())
+    new_view(with_flags(config, flags), "asmview", vim.api.nvim_get_current_win())
 
     vim.api.nvim_create_autocmd("CursorMoved", {
         group = group,
@@ -350,19 +365,25 @@ function M.open()
     attach(src_buf, file)
 end
 
-function M.compare()
+function M.compare(flags)
     if not state then
         M.open()
         if not state then
             return
         end
     end
+    local cfg = with_flags(vim.tbl_deep_extend("force", config, config.compare or {}), flags)
     if state.views[2] then
-        vim.api.nvim_buf_delete(state.views[2].buf, { force = true })
+        if flags and #flags > 0 then
+            state.views[2].cfg = cfg
+            build(state.views[2])
+        else
+            vim.api.nvim_buf_delete(state.views[2].buf, { force = true })
+        end
         return
     end
     local main_win = vim.fn.bufwinid(state.views[1].buf)
-    local v = new_view(vim.tbl_deep_extend("force", config, config.compare or {}), "asmview-compare", main_win, config.compare_split)
+    local v = new_view(cfg, "asmview-compare", main_win, config.compare_split)
     name_view(v)
     set_view(v, { "loading " .. vim.fs.basename(state.file) .. "..." })
     build(v)

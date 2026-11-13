@@ -11,6 +11,7 @@ local config = {
     objdump = nil,
     object = nil,
     compare = { build = true },
+    compare_split = "below",
     c_fallback_flags = { "-O2" },
 }
 
@@ -274,12 +275,12 @@ local function attach(buf, file)
     build_all()
 end
 
-local function new_view(cfg, scheme, win)
+local function new_view(cfg, scheme, win, split)
     local buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].filetype = "asm"
     vim.bo[buf].bufhidden = "wipe"
     vim.bo[buf].modifiable = false
-    local asm_win = vim.api.nvim_open_win(buf, false, { split = "right", win = win })
+    local asm_win = vim.api.nvim_open_win(buf, false, { split = split or "right", win = win })
     vim.wo[asm_win].wrap = false
     local v = { buf = buf, cfg = cfg, scheme = scheme, src_to_asm = {}, asm_to_src = {}, notes = {}, note_col = 0 }
     table.insert(state.views, v)
@@ -361,7 +362,7 @@ function M.compare()
         return
     end
     local main_win = vim.fn.bufwinid(state.views[1].buf)
-    local v = new_view(vim.tbl_deep_extend("force", config, config.compare or {}), "asmview-compare", main_win)
+    local v = new_view(vim.tbl_deep_extend("force", config, config.compare or {}), "asmview-compare", main_win, config.compare_split)
     name_view(v)
     set_view(v, { "loading " .. vim.fs.basename(state.file) .. "..." })
     build(v)

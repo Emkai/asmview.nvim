@@ -21,7 +21,7 @@ Side-by-side assembly view for C, C++ and Go. Compiles locally and highlights th
 
 `:AsmView` toggles the view. It refreshes on `:w` and follows you to other C, C++ and Go buffers. Highlighted assembly rows and the cursor row get an aligned `# ...` note saying what the instruction does with its operands, e.g. `# multiply xmm0 by [rsp+8] (double)` (x86, Go and ARM).
 
-`require("asmview").compare()` toggles a second assembly pane next to the first, set up by the `compare` option (merged over the main options). By default it compiles the file itself (`build = true`) while the main pane reads your build output, so you can put e.g. a firmware object next to a host build. Both panes highlight the same source line.
+`require("asmview").compare()` toggles a second assembly pane below the first (`compare_split = "right"` puts it beside), set up by the `compare` option (merged over the main options). By default it compiles the file itself (`build = true`) while the main pane reads your build output, so you can put e.g. a firmware object next to a host build. Both panes highlight the same source line.
 
 `require("asmview").ask()` sends the highlighted assembly, its source line with `ai_context_lines` of surrounding code, and the function name to `ai_cmd` (default `claude -p`) and shows the answer in a popup. With the compare pane open it sends both versions and asks for the differences. Close the popup with `q` or `<Esc>`.
 
@@ -42,6 +42,7 @@ Side-by-side assembly view for C, C++ and Go. Compiles locally and highlights th
     objdump = nil,
     object = nil,
     compare = { build = true },
+    compare_split = "below",
     c_fallback_flags = { "-O2" },
 }
 ```
